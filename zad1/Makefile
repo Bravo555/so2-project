@@ -1,3 +1,3 @@
 run: main.cpp
-	g++ --std=c++20 main.cpp -lsfml-graphics -lsfml-window -lsfml-system -O
+	clang++ -Wall -std=c++2a -O -g main.cpp -lsfml-graphics -lsfml-window -lsfml-system
 	./a.out

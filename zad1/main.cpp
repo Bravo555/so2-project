@@ -1,4 +1,5 @@
 #include <iostream>
+#include <iomanip>
 #include <thread>
 #include <mutex>
 #include <random>
@@ -11,13 +12,18 @@ const float TRACK_THICKNESS = 100.0f;
 
 const int CROSSTRACK_X = WINDOW_WIDTH * 0.5;
 
-const int PATH_START_X = (WINDOW_WIDTH - TRACK_WIDTH - TRACK_THICKNESS) / 2;
-const int PATH_START_Y = (WINDOW_HEIGHT - TRACK_HEIGHT - TRACK_THICKNESS) / 2;
+const float PATH_START_X = (WINDOW_WIDTH - TRACK_WIDTH - TRACK_THICKNESS) / 2;
+const float PATH_START_Y = (WINDOW_HEIGHT - TRACK_HEIGHT - TRACK_THICKNESS) / 2;
 
-const int PATH_END_X = (WINDOW_WIDTH - TRACK_THICKNESS * 1.5 );
-const int PATH_END_Y = (WINDOW_HEIGHT - TRACK_THICKNESS * 1.0 );
+const float PATH_END_X = (WINDOW_WIDTH - TRACK_THICKNESS * 1.5 );
+const float PATH_END_Y = (WINDOW_HEIGHT - TRACK_THICKNESS * 1.0 );
+
+const int FRAMETIME_INFO_PRINT_INTERVAL_MS = 1000;
 
 const float CAR_SPEED = 5.0f;
+
+namespace chrono = std::chrono;
+using ms = std::chrono::duration<float, std::milli>;
 
 enum CarMoveState {
     MOVE_RIGHT,
@@ -94,6 +100,7 @@ struct Car {
 
 int main() {
     sf::RenderWindow window(sf::VideoMode(WINDOW_WIDTH, WINDOW_HEIGHT), "Projekt Systemy operacyjne - zadanie 1");
+    window.setFramerateLimit(120);
 
     sf::RectangleShape track({ TRACK_WIDTH, TRACK_HEIGHT });
     track.setOrigin(TRACK_WIDTH / 2, TRACK_HEIGHT / 2);
@@ -107,18 +114,15 @@ int main() {
     crossTrack.setFillColor(sf::Color({255, 150, 0, 150}));
 
     auto cars = std::make_shared<std::vector<Car>>();
-
     auto readCarsLock = std::make_shared<std::mutex>();
+
     auto handle = new std::thread([readCarsLock, cars] {
-
-
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<int> car_offset_dist(-TRACK_THICKNESS / 4, TRACK_THICKNESS / 4);
 
         for(int i = 0; i < 100000; i++) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            std::cout << i << std::endl;
+            std::this_thread::sleep_for(chrono::microseconds(500));
 
             int x = car_offset_dist(gen);
             int y = car_offset_dist(gen);
@@ -131,7 +135,14 @@ int main() {
     });
     handle->detach();
 
+    auto programStartTimeMs = chrono::steady_clock::now();
+    auto lastFrametimePrint = programStartTimeMs;
+    uint32_t numFrame = 0;
+
     while (window.isOpen()) {
+        ++numFrame;
+        auto currentTime = chrono::steady_clock::now();
+
         sf::Event event;
         while (window.pollEvent(event))
         {
@@ -139,21 +150,43 @@ int main() {
                 window.close();
         }
 
-        window.clear();
+        readCarsLock->lock();
 
+        // update
+        auto frametimeUpdateStart = chrono::steady_clock::now();
+        for(auto& car: *cars) {
+            car.update();
+        }
+        auto frametimeUpdateEnd = chrono::steady_clock::now();
+
+        // draw
+        auto frametimeDrawStart = chrono::steady_clock::now();
+        window.clear();
         window.draw(track);
         window.draw(crossTrack);
 
-        readCarsLock->lock();
         for(auto& car: *cars) {
-            car.update();
             window.draw(car.shape);
         }
+        auto frametimeDrawEnd = chrono::steady_clock::now();
+
         readCarsLock->unlock();
 
         window.display();
 
-        sf::sleep(sf::milliseconds(7));
+        float frametimeDraw = chrono::duration_cast<ms>(frametimeDrawEnd - frametimeDrawStart).count();
+        float frametimeUpdate = chrono::duration_cast<ms>(frametimeUpdateEnd - frametimeUpdateStart).count();
+        float frametimeFull = chrono::duration_cast<ms>(chrono::steady_clock::now() - currentTime).count();
+
+        if(chrono::duration_cast<ms>(currentTime - lastFrametimePrint).count() > FRAMETIME_INFO_PRINT_INTERVAL_MS) {
+            std::cout.precision(3);
+            std::cout << '[' << numFrame << ']' << "   ";
+            std::cout << "simulation: " << std::fixed << std::setw(5) << frametimeUpdate << " ms   ";
+            std::cout << "draw: " << std::fixed << std::setw(5) << frametimeDraw << " ms   ";
+            std::cout << "frame: " << std::fixed << std::setw(5) << frametimeFull << " ms   ";
+            std::cout << std::endl;
+            lastFrametimePrint = currentTime;
+        }
     }
 
     return 0;
