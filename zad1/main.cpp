@@ -29,7 +29,8 @@ const float SYNC_REGION_HEIGHT = TRACK_THICKNESS;
 
 const int FRAMETIME_INFO_PRINT_INTERVAL_MS = 1000;
 
-const float CAR_SPEED = 2.0f;
+const float CAR_SPEED_MIN = 0.5f;
+const float CAR_SPEED_MAX = 2.0f;
 const float CAR_SIZE = 20.0f;
 
 const int NUM_CARS = 100;
@@ -37,37 +38,10 @@ const int NUM_CARS = 100;
 namespace chrono = std::chrono;
 using ms = std::chrono::duration<float, std::milli>;
 
-class SyncSystem {
-public:
-    std::vector<uint32_t> givenTokens;
-    static const int MAX_TOKENS = 4;
-
-    // save all token requests into a sorted set. to grant a token, check if
-    // it's at the index [0..MAX_TOKENS). after this token is released, next
-    // items will shift to the left and we'll be able to grant the token to the
-    // next item in the waiting line immediately
-    bool requestToken(uint32_t id) {
-        if(std::find(givenTokens.begin(), givenTokens.end(), id) == std::end(givenTokens)) {
-            givenTokens.emplace_back(id);
-        }
-
-        auto pos = std::find(givenTokens.begin(), givenTokens.end(), id);
-        if(pos == std::end(givenTokens)) {
-            return false;
-        }
-
-        return std::distance(givenTokens.begin(), pos) < MAX_TOKENS;
-    }
-
-    bool releaseToken(uint32_t id) {
-        auto pos = std::find(givenTokens.begin(), givenTokens.end(), id);
-        if(pos != std::end(givenTokens)) {
-            givenTokens.erase(pos);
-            return true;
-        }
-        return false;
-    }
-};
+template <typename T>
+void printVecInline(const std::vector<T>& v) {
+    for(auto& e: v) { std::cout << e << ' '; }
+}
 
 enum CarMoveState {
     MOVE_RIGHT,
@@ -80,6 +54,7 @@ enum CarMoveState {
 
 struct Car {
     uint32_t id;
+    float speed;
     sf::RectangleShape shape;
     sf::Text label;
     sf::Vector2f offset;
@@ -90,35 +65,80 @@ private:
     inline static uint32_t nextId = 0;
 
 public:
-    Car(const sf::Vector2f& offset): offset(offset) {
+    Car(const sf::Vector2f& offset, float speed): offset(offset), speed(speed) {
         shape = sf::RectangleShape({CAR_SIZE, CAR_SIZE});
         shape.setOrigin({CAR_SIZE / 2, CAR_SIZE / 2});
         hasToken = false;
         id = nextId++;
         label.setFillColor(sf::Color::Black);
         label.setString(std::to_string(id));
-        label.setCharacterSize(14);
+        label.setCharacterSize(12);
     }
 
-    static Car spawnTrack(const sf::Vector2f& offset) {
-        Car car(offset);
+    static Car spawnTrack(const sf::Vector2f& offset, float speed, const sf::Font& font) {
+        Car car(offset, speed);
 
         car.shape.setPosition({PATH_START_X, PATH_START_Y});
         car.shape.move(offset);
         car.label.setPosition(car.shape.getPosition() - sf::Vector2f{CAR_SIZE / 2, CAR_SIZE / 2});
         car.state = MOVE_RIGHT;
 
+        car.label.setFont(font);
+
         return car;
     }
 
-    static Car spawnCross(const sf::Vector2f& offset) {
-        Car car(offset);
+    static Car spawnCross(const sf::Vector2f& offset, float speed, const sf::Font& font) {
+        Car car(offset, speed);
 
         car.shape.setPosition({CROSSTRACK_X + (CROSSTRACK_WIDTH / 2), 0});
         car.shape.move(offset);
         car.state = MOVE_STRAIGHT_DOWN;
 
+        car.label.setFont(font);
+
         return car;
+    }
+};
+
+class SyncSystem {
+public:
+    std::vector<std::pair<uint32_t, CarMoveState>> givenTokens;
+    static const int MAX_TOKENS = 4;
+
+    // Save all token requests into a sorted set. To grant a token, check if:
+    // - it's at the index [0..MAX_TOKENS) after this token is released, next
+    // - there are no elements with opposing state before in the queue
+    // items will shift to the left and we'll be able to grant the token to the
+    // next item in the waiting line immediately
+    bool requestToken(const Car& car) {
+        auto eqId = [&](const std::pair<uint32_t, CarMoveState>& pair) { return car.id == pair.first; };
+        auto pos = std::find_if(givenTokens.begin(), givenTokens.end(), eqId);
+        if(pos == std::end(givenTokens)) {
+            auto& val = givenTokens.emplace_back(std::make_pair(car.id, car.state));
+            pos = givenTokens.end() - 1;
+        }
+
+        auto firstCar = givenTokens.front();
+        bool isQueuedBehindOpposingState = std::find_if(givenTokens.begin(), pos,
+            [&](std::pair<uint32_t, CarMoveState>& pair){ return car.state != pair.second;}) != pos;
+        auto matchPos = std::find_if(givenTokens.begin(), givenTokens.end(),
+            [&](std::pair<uint32_t, CarMoveState>& pair){ return car.state != pair.second;});
+
+        auto shouldPass = std::distance(givenTokens.begin(), pos) < MAX_TOKENS
+            && !isQueuedBehindOpposingState;
+
+        return shouldPass;
+    }
+
+    bool releaseToken(const Car& car) {
+        auto eqId = [&](const std::pair<uint32_t, CarMoveState>& pair) { return car.id == pair.first; };
+        auto pos = std::find_if(givenTokens.begin(), givenTokens.end(), eqId);
+        if(pos == std::end(givenTokens)) {
+            return false;
+        }
+        givenTokens.erase(pos);
+        return true;
     }
 };
 
@@ -126,20 +146,26 @@ struct CarSystem {
     SyncSystem syncRegion0;
     SyncSystem syncRegion1;
 
-    void update(Car& car) {
-        auto pos = car.shape.getPosition();
-        int newX = 0, newY = 0;
+    void update(std::vector<Car>& cars) {
+        for(auto& car: cars) {
+            updateCar(car);
+        }
+    }
 
-        int path_start_x = PATH_START_X + car.offset.x;
-        int path_end_x = PATH_END_X + car.offset.x;
-        int path_start_y = PATH_START_Y + car.offset.y;
-        int path_end_y = PATH_END_Y + car.offset.y;
+    void updateCar(Car& car) {
+        auto pos = car.shape.getPosition();
+        float newX = 0, newY = 0;
+
+        float path_start_x = PATH_START_X + car.offset.x;
+        float path_end_x = PATH_END_X + car.offset.x;
+        float path_start_y = PATH_START_Y + car.offset.y;
+        float path_end_y = PATH_END_Y + car.offset.y;
 
         sf::Vector2f nextPosition;
 
         switch (car.state) {
         case MOVE_RIGHT:
-            newX = pos.x + CAR_SPEED;
+            newX = pos.x + car.speed;
             if(newX >= path_end_x) {
                 car.state = MOVE_DOWN;
                 newX = path_end_x;
@@ -148,7 +174,7 @@ struct CarSystem {
             break;
 
         case MOVE_DOWN:
-            newY = pos.y + CAR_SPEED;
+            newY = pos.y + car.speed;
             if(newY >= path_end_y) {
                 car.state = MOVE_LEFT;
                 newY = path_end_y;
@@ -157,7 +183,7 @@ struct CarSystem {
             break;
 
         case MOVE_LEFT:
-            newX = pos.x - CAR_SPEED;
+            newX = pos.x - car.speed;
             if(newX <= path_start_x) {
                 car.state = MOVE_UP;
                 newX = path_start_x;
@@ -166,11 +192,16 @@ struct CarSystem {
             break;
 
         case MOVE_UP:
-            newY = pos.y - CAR_SPEED;
+            newY = pos.y - car.speed;
             if(newY <= path_start_y) {
                 car.state = MOVE_RIGHT;
                 newX = path_start_y;
             }
+            nextPosition = car.shape.getPosition() + sf::Vector2f{0.0, newY - pos.y};
+            break;
+
+        case MOVE_STRAIGHT_DOWN:
+            newY = pos.y + car.speed;
             nextPosition = car.shape.getPosition() + sf::Vector2f{0.0, newY - pos.y};
             break;
 
@@ -191,14 +222,14 @@ struct CarSystem {
             car.shape.setPosition(nextPosition);
             car.label.setPosition(nextPosition - sf::Vector2f{CAR_SIZE / 2, CAR_SIZE / 2});
             if(car.hasToken) {
-                syncRegion0.releaseToken(car.id);
-                syncRegion1.releaseToken(car.id);
+                syncRegion0.releaseToken(car);
+                syncRegion1.releaseToken(car);
                 car.hasToken = false;
             }
             return;
         }
 
-        car.hasToken = car.hasToken || syncRegion.value().get().requestToken(car.id);
+        car.hasToken = car.hasToken || syncRegion.value().get().requestToken(car);
         if(car.hasToken) {
             car.shape.setPosition(nextPosition);
             car.label.setPosition(nextPosition - sf::Vector2f{CAR_SIZE / 2, CAR_SIZE / 2});
@@ -206,19 +237,12 @@ struct CarSystem {
     }
 };
 
-
-template <typename T>
-void printVecInline(const std::vector<T>& v) {
-    for(auto& e: v) { std::cout << e << ' '; }
-}
-
-
 int main() {
     sf::RenderWindow window(sf::VideoMode(WINDOW_WIDTH, WINDOW_HEIGHT), "Projekt Systemy operacyjne - zadanie 1");
     window.setFramerateLimit(120);
 
     sf::Font font;
-    font.loadFromFile("/usr/share/fonts/TTF/Roboto-Regular.ttf");
+    font.loadFromFile("/usr/share/fonts/TTF/DejaVuSansMono.ttf");
 
     sf::RectangleShape track({ TRACK_WIDTH, TRACK_HEIGHT });
     track.setOrigin(TRACK_WIDTH / 2, TRACK_HEIGHT / 2);
@@ -244,26 +268,48 @@ int main() {
     auto carSystem = CarSystem { SyncSystem{}, SyncSystem{} };
     auto pause = std::make_shared<std::atomic<bool>>(false);
 
-    auto handle = new std::thread([readCarsLock, cars, pause, &font] {
+    auto spawnTrack = new std::thread([readCarsLock, cars, pause, &font] {
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<int> car_offset_dist(-TRACK_THICKNESS / 4, TRACK_THICKNESS / 4);
+        std::uniform_real_distribution<float> speed_dist(CAR_SPEED_MIN, CAR_SPEED_MAX);
 
         for(int i = 0; i < NUM_CARS; !*pause ? ++i : i) {
             std::this_thread::sleep_for(chrono::milliseconds(100));
             if(*pause) continue;
 
-            int x = car_offset_dist(gen);
-            int y = car_offset_dist(gen);
+            float x = car_offset_dist(gen);
+            float y = car_offset_dist(gen);
+            float speed = speed_dist(gen);
 
             readCarsLock->lock();
-            auto& c = cars->emplace_back(Car::spawnTrack({(float)x, (float)y}));
+            cars->emplace_back(Car::spawnTrack({x, y}, speed, font));
+            readCarsLock->unlock();
+        }
+        std::cout << "exiting!" << std::endl;
+    });
+
+    auto spawnCrosstrack = new std::thread([readCarsLock, cars, pause, &font] {
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<int> car_offset_dist(-TRACK_THICKNESS / 4, TRACK_THICKNESS / 4);
+        std::uniform_real_distribution<float> speed_dist(CAR_SPEED_MIN, CAR_SPEED_MAX);
+
+        while(true) {
+            std::this_thread::sleep_for(chrono::milliseconds(500));
+            if(*pause) continue;
+
+            float x = car_offset_dist(gen);
+            float y = car_offset_dist(gen);
+            float speed = speed_dist(gen);
+
+            readCarsLock->lock();
+            auto& c = cars->emplace_back(Car::spawnCross({x, y}, speed, font));
             c.label.setFont(font);
             readCarsLock->unlock();
         }
         std::cout << "exiting!" << std::endl;
     });
-    handle->detach();
 
     auto programStartTimeMs = chrono::steady_clock::now();
     auto lastFrametimePrint = programStartTimeMs;
@@ -293,13 +339,12 @@ int main() {
 
         // update
         auto frametimeUpdateStart = chrono::steady_clock::now();
-        for(auto& car: *cars) {
-            carSystem.update(car);
-        }
+        carSystem.update(*cars);
         auto frametimeUpdateEnd = chrono::steady_clock::now();
 
         // draw
         auto frametimeDrawStart = chrono::steady_clock::now();
+
         window.clear();
         window.draw(track);
         window.draw(crossTrack);
@@ -311,12 +356,12 @@ int main() {
             window.draw(car.label);
         }
 
-        sf::Vertex lines[] = {
-            sf::Vertex({0.0, SYNC_REGION0_Y}), sf::Vertex({WINDOW_WIDTH, SYNC_REGION0_Y}),
-            sf::Vertex({0.0, SYNC_REGION1_Y}), sf::Vertex({WINDOW_WIDTH, SYNC_REGION1_Y})
-        };
+        // sf::Vertex lines[] = {
+        //     sf::Vertex({0.0, SYNC_REGION0_Y}), sf::Vertex({WINDOW_WIDTH, SYNC_REGION0_Y}),
+        //     sf::Vertex({0.0, SYNC_REGION1_Y}), sf::Vertex({WINDOW_WIDTH, SYNC_REGION1_Y})
+        // };
 
-        window.draw(lines, 4, sf::Lines);
+        // window.draw(lines, 4, sf::Lines);
 
         auto frametimeDrawEnd = chrono::steady_clock::now();
 
