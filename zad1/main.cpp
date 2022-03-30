@@ -5,6 +5,8 @@
 #include <random>
 #include <memory>
 #include <queue>
+#include <unordered_set>
+#include <vector>
 #include <optional>
 #include <SFML/Graphics.hpp>
 
@@ -35,7 +37,7 @@ const float CAR_SIZE = 20.0f;
 
 const int NUM_CARS = 20;
 
-const bool THREAD_UPDATE = true;
+const bool THREAD_UPDATE = false;
 
 namespace chrono = std::chrono;
 using ms = std::chrono::duration<float, std::milli>;
@@ -148,9 +150,22 @@ struct CarSystem {
     SyncSystem syncRegion0;
     SyncSystem syncRegion1;
 
+    std::unordered_set<size_t> removeSet;
+
     void update(std::vector<Car>& cars) {
-        for(auto& car: cars) {
-            updateCar(car, true);
+        for(auto i = cars.begin(); i != cars.end(); ++i) {
+            bool shouldRemove = updateCar(*i, true);
+            if(shouldRemove) {
+                size_t idx = i - cars.begin();
+                removeSet.insert(idx);
+            }
+        }
+
+        if(!removeSet.empty()) {
+            for(auto idx: removeSet) {
+                cars.erase(cars.begin() + idx);
+            }
+            removeSet.clear();
         }
     }
 
@@ -197,7 +212,7 @@ struct CarSystem {
         return canMove;
     }
 
-    void updateCar(Car& car, bool shouldSync) {
+    bool updateCar(Car& car, bool shouldSync) {
         auto pos = car.shape.getPosition();
         float newX = 0, newY = 0;
 
@@ -262,6 +277,11 @@ struct CarSystem {
             car.shape.setPosition(nextPosition);
             car.label.setPosition(nextPosition - sf::Vector2f{CAR_SIZE / 2, CAR_SIZE / 2});
         }
+
+        if(nextPosition.y > WINDOW_HEIGHT) {
+            return true;
+        }
+        return false;
     }
 };
 
@@ -301,7 +321,7 @@ int main() {
     auto carSystem = CarSystem { SyncSystem{}, SyncSystem{} };
     auto pause = std::make_shared<std::atomic<bool>>(false);
     std::vector<std::thread*> handles;
-    
+
     auto threadedCarsLock = std::make_shared<std::mutex>();
     std::vector<std::shared_ptr<Car>> threadedCars;
     threadedCars.reserve(200);
@@ -311,9 +331,11 @@ int main() {
         std::mt19937 gen(rd());
         std::uniform_int_distribution<int> car_offset_dist(-TRACK_THICKNESS / 4, TRACK_THICKNESS / 4);
         std::uniform_real_distribution<float> speed_dist(CAR_SPEED_MIN, CAR_SPEED_MAX);
+        std::uniform_int_distribution<int> nextSpawnTimeMsDist(100, 1000);
 
         for(int i = 0; i < NUM_CARS; !*pause ? ++i : i) {
-            std::this_thread::sleep_for(chrono::milliseconds(1000));
+            auto nextSpawnTimeMs = nextSpawnTimeMsDist(gen);
+            std::this_thread::sleep_for(chrono::milliseconds(nextSpawnTimeMs));
             if(*pause) continue;
 
             float x = car_offset_dist(gen);
@@ -334,7 +356,7 @@ int main() {
                 }));
             }
         }
-        std::cout << "exiting!" << std::endl;
+        std::cout << "spawn thread exiting!" << std::endl;
     });
 
     auto spawnCrosstrack = new std::thread([&, readCarsLock, cars, pause] {
@@ -342,9 +364,11 @@ int main() {
         std::mt19937 gen(rd());
         std::uniform_int_distribution<int> car_offset_dist(-TRACK_THICKNESS / 4, TRACK_THICKNESS / 4);
         std::uniform_real_distribution<float> speed_dist(CAR_SPEED_MIN, CAR_SPEED_MAX);
+        std::uniform_int_distribution<int> nextSpawnTimeMsDist(100, 1000);
 
         while(true) {
-            std::this_thread::sleep_for(chrono::milliseconds(500));
+            auto nextSpawnTimeMs = nextSpawnTimeMsDist(gen);
+            std::this_thread::sleep_for(chrono::milliseconds(nextSpawnTimeMs));
             if(*pause) continue;
 
             float x = car_offset_dist(gen);
@@ -365,20 +389,16 @@ int main() {
                     threadedCarsLock->unlock();
 
                     carSystem.updateCarSync(*c);
-                    std::cout << "finished update for car " << c->id << std::endl;
 
                     threadedCarsLock->lock();
                     auto pos = std::find(threadedCars.begin(), threadedCars.end(), c);
                     if(pos != threadedCars.end())
                         threadedCars.erase(pos);
                     threadedCarsLock->unlock();
-
-                    std::cout << "car " << c->id << " deleted from vec, exiting car thread" << std::endl;
-                    std::cout << "remaining references for car " << c->id << ": " << c.use_count() << std::endl;
                 }));
             }
         }
-        std::cout << "exiting!" << std::endl;
+        std::cout << "exiting spawn thread!" << std::endl;
     });
 
     auto programStartTimeMs = chrono::steady_clock::now();
@@ -429,7 +449,6 @@ int main() {
         } else {
             threadedCarsLock->lock();
             for(auto& car: threadedCars) {
-                // std::cout << car->id << std::endl;
                 window.draw(car->shape);
                 window.draw(car->label);
             }
