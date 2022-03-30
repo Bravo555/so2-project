@@ -35,6 +35,8 @@ const float CAR_SIZE = 20.0f;
 
 const int NUM_CARS = 100;
 
+const bool THREAD_UPDATE = true;
+
 namespace chrono = std::chrono;
 using ms = std::chrono::duration<float, std::milli>;
 
@@ -148,11 +150,49 @@ struct CarSystem {
 
     void update(std::vector<Car>& cars) {
         for(auto& car: cars) {
-            updateCar(car);
+            updateCar(car, true);
         }
     }
 
-    void updateCar(Car& car) {
+    void updateCarSync(Car& car) {
+        chrono::time_point<chrono::steady_clock> lastTime;
+        while(true) {
+            auto currTime = chrono::steady_clock::now();
+            if(chrono::duration_cast<ms>(currTime - lastTime).count() > 8.3) {
+                updateCar(car, false);
+                lastTime = currTime;
+            }
+        }
+    }
+
+    // Tries to synchronize access to sync regions using their request/release
+    // Token methods. Returns true if car can move, and false if it can't.
+    bool syncCrosses(Car& car, const sf::Vector2f& nextPosition) {
+        auto syncRegion0Box = sf::Rect<float>({CROSSTRACK_X, SYNC_REGION0_Y}, {SYNC_REGION_WIDTH, SYNC_REGION_HEIGHT});
+        auto syncRegion1Box = sf::Rect<float>({CROSSTRACK_X, SYNC_REGION1_Y}, {SYNC_REGION_WIDTH, SYNC_REGION_HEIGHT});
+
+        std::optional<std::reference_wrapper<SyncSystem>> syncRegion;
+        bool canMove = true;
+        if(syncRegion0Box.contains(nextPosition)) {
+            syncRegion = syncRegion0;
+        } else if(syncRegion1Box.contains(nextPosition)) {
+            syncRegion = syncRegion1;
+        } else {
+            if(car.hasToken) {
+                syncRegion0.releaseToken(car);
+                syncRegion1.releaseToken(car);
+                car.hasToken = false;
+            }
+        }
+
+        if(syncRegion.has_value()) {
+            car.hasToken = car.hasToken || syncRegion.value().get().requestToken(car);
+            canMove = car.hasToken;
+        }
+        return canMove;
+    }
+
+    void updateCar(Car& car, bool shouldSync) {
         auto pos = car.shape.getPosition();
         float newX = 0, newY = 0;
 
@@ -210,27 +250,10 @@ struct CarSystem {
         }
 
         // here check if we're trying to move on sync region
-        auto syncRegion0Box = sf::Rect<float>({CROSSTRACK_X, SYNC_REGION0_Y}, {SYNC_REGION_WIDTH, SYNC_REGION_HEIGHT});
-        auto syncRegion1Box = sf::Rect<float>({CROSSTRACK_X, SYNC_REGION1_Y}, {SYNC_REGION_WIDTH, SYNC_REGION_HEIGHT});
+        bool canMove = true;
+        if(shouldSync) canMove = syncCrosses(car, nextPosition);
 
-        std::optional<std::reference_wrapper<SyncSystem>> syncRegion;
-        if(syncRegion0Box.contains(nextPosition)) {
-            syncRegion = syncRegion0;
-        } else if(syncRegion1Box.contains(nextPosition)) {
-            syncRegion = syncRegion1;
-        } else {
-            car.shape.setPosition(nextPosition);
-            car.label.setPosition(nextPosition - sf::Vector2f{CAR_SIZE / 2, CAR_SIZE / 2});
-            if(car.hasToken) {
-                syncRegion0.releaseToken(car);
-                syncRegion1.releaseToken(car);
-                car.hasToken = false;
-            }
-            return;
-        }
-
-        car.hasToken = car.hasToken || syncRegion.value().get().requestToken(car);
-        if(car.hasToken) {
+        if(canMove) {
             car.shape.setPosition(nextPosition);
             car.label.setPosition(nextPosition - sf::Vector2f{CAR_SIZE / 2, CAR_SIZE / 2});
         }
@@ -264,11 +287,15 @@ int main() {
     syncRegion1.setFillColor(sf::Color::Red);
 
     auto cars = std::make_shared<std::vector<Car>>();
+    // preallocate
+    if(THREAD_UPDATE)cars->reserve(NUM_CARS);
     auto readCarsLock = std::make_shared<std::mutex>();
     auto carSystem = CarSystem { SyncSystem{}, SyncSystem{} };
     auto pause = std::make_shared<std::atomic<bool>>(false);
+    std::vector<std::thread*> handles;
+    std::vector<Car*> threadedCars;
 
-    auto spawnTrack = new std::thread([readCarsLock, cars, pause, &font] {
+    auto spawnTrack = new std::thread([&, readCarsLock, cars, pause] {
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<int> car_offset_dist(-TRACK_THICKNESS / 4, TRACK_THICKNESS / 4);
@@ -282,14 +309,22 @@ int main() {
             float y = car_offset_dist(gen);
             float speed = speed_dist(gen);
 
-            readCarsLock->lock();
-            cars->emplace_back(Car::spawnTrack({x, y}, speed, font));
-            readCarsLock->unlock();
+            if(!THREAD_UPDATE) {
+                readCarsLock->lock();
+                auto& c = cars->emplace_back(Car::spawnTrack({x, y}, speed, font));
+                readCarsLock->unlock();
+            } else {
+                handles.emplace_back(new std::thread([&](){
+                    Car c = Car::spawnTrack({x, y}, speed, font);
+                    threadedCars.push_back(&c);
+                    carSystem.updateCarSync(c);
+                }));
+            }
         }
         std::cout << "exiting!" << std::endl;
     });
 
-    auto spawnCrosstrack = new std::thread([readCarsLock, cars, pause, &font] {
+    auto spawnCrosstrack = new std::thread([&, readCarsLock, cars, pause] {
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<int> car_offset_dist(-TRACK_THICKNESS / 4, TRACK_THICKNESS / 4);
@@ -303,10 +338,17 @@ int main() {
             float y = car_offset_dist(gen);
             float speed = speed_dist(gen);
 
-            readCarsLock->lock();
-            auto& c = cars->emplace_back(Car::spawnCross({x, y}, speed, font));
-            c.label.setFont(font);
-            readCarsLock->unlock();
+            if(!THREAD_UPDATE) {
+                readCarsLock->lock();
+                auto& c = cars->emplace_back(Car::spawnCross({x, y}, speed, font));
+                readCarsLock->unlock();
+            } else {
+                handles.emplace_back(new std::thread([&](){
+                    Car c = Car::spawnCross({x, y}, speed, font);
+                    threadedCars.push_back(&c);
+                    carSystem.updateCarSync(c);
+                }));
+            }
         }
         std::cout << "exiting!" << std::endl;
     });
@@ -339,7 +381,7 @@ int main() {
 
         // update
         auto frametimeUpdateStart = chrono::steady_clock::now();
-        carSystem.update(*cars);
+        if(!THREAD_UPDATE) carSystem.update(*cars);
         auto frametimeUpdateEnd = chrono::steady_clock::now();
 
         // draw
@@ -351,17 +393,17 @@ int main() {
         window.draw(syncRegion0);
         window.draw(syncRegion1);
 
-        for(auto& car: *cars) {
-            window.draw(car.shape);
-            window.draw(car.label);
+        if(!THREAD_UPDATE) {
+            for(auto& car: *cars) {
+                window.draw(car.shape);
+                window.draw(car.label);
+            }
+        } else {
+            for(auto car: threadedCars) {
+                window.draw(car->shape);
+                window.draw(car->label);
+            }
         }
-
-        // sf::Vertex lines[] = {
-        //     sf::Vertex({0.0, SYNC_REGION0_Y}), sf::Vertex({WINDOW_WIDTH, SYNC_REGION0_Y}),
-        //     sf::Vertex({0.0, SYNC_REGION1_Y}), sf::Vertex({WINDOW_WIDTH, SYNC_REGION1_Y})
-        // };
-
-        // window.draw(lines, 4, sf::Lines);
 
         auto frametimeDrawEnd = chrono::steady_clock::now();
 
