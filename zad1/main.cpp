@@ -33,7 +33,7 @@ const float CAR_SPEED_MIN = 0.5f;
 const float CAR_SPEED_MAX = 2.0f;
 const float CAR_SIZE = 20.0f;
 
-const int NUM_CARS = 100;
+const int NUM_CARS = 20;
 
 const bool THREAD_UPDATE = true;
 
@@ -162,7 +162,12 @@ struct CarSystem {
                 updateCar(car, false);
                 lastTime = currTime;
             }
+
+            if(car.shape.getPosition().y > WINDOW_HEIGHT && car.state == MOVE_STRAIGHT_DOWN) {
+                break;
+            }
         }
+        std::cout << "thread of car " << car.id << " exiting\n";
     }
 
     // Tries to synchronize access to sync regions using their request/release
@@ -260,6 +265,11 @@ struct CarSystem {
     }
 };
 
+struct A {
+    int a;
+    int b;
+};
+
 int main() {
     sf::RenderWindow window(sf::VideoMode(WINDOW_WIDTH, WINDOW_HEIGHT), "Projekt Systemy operacyjne - zadanie 1");
     window.setFramerateLimit(120);
@@ -287,13 +297,14 @@ int main() {
     syncRegion1.setFillColor(sf::Color::Red);
 
     auto cars = std::make_shared<std::vector<Car>>();
-    // preallocate
-    if(THREAD_UPDATE)cars->reserve(NUM_CARS);
     auto readCarsLock = std::make_shared<std::mutex>();
     auto carSystem = CarSystem { SyncSystem{}, SyncSystem{} };
     auto pause = std::make_shared<std::atomic<bool>>(false);
     std::vector<std::thread*> handles;
-    std::vector<Car*> threadedCars;
+    
+    auto threadedCarsLock = std::make_shared<std::mutex>();
+    std::vector<std::shared_ptr<Car>> threadedCars;
+    threadedCars.reserve(200);
 
     auto spawnTrack = new std::thread([&, readCarsLock, cars, pause] {
         std::random_device rd;
@@ -302,7 +313,7 @@ int main() {
         std::uniform_real_distribution<float> speed_dist(CAR_SPEED_MIN, CAR_SPEED_MAX);
 
         for(int i = 0; i < NUM_CARS; !*pause ? ++i : i) {
-            std::this_thread::sleep_for(chrono::milliseconds(100));
+            std::this_thread::sleep_for(chrono::milliseconds(1000));
             if(*pause) continue;
 
             float x = car_offset_dist(gen);
@@ -315,9 +326,11 @@ int main() {
                 readCarsLock->unlock();
             } else {
                 handles.emplace_back(new std::thread([&](){
-                    Car c = Car::spawnTrack({x, y}, speed, font);
-                    threadedCars.push_back(&c);
-                    carSystem.updateCarSync(c);
+                    auto c = std::make_shared<Car>(Car::spawnTrack({x, y}, speed, font));
+                    threadedCarsLock->lock();
+                    threadedCars.push_back(c);
+                    threadedCarsLock->unlock();
+                    carSystem.updateCarSync(*c);
                 }));
             }
         }
@@ -344,9 +357,24 @@ int main() {
                 readCarsLock->unlock();
             } else {
                 handles.emplace_back(new std::thread([&](){
-                    Car c = Car::spawnCross({x, y}, speed, font);
-                    threadedCars.push_back(&c);
-                    carSystem.updateCarSync(c);
+                    auto c = std::make_shared<Car>(Car::spawnCross({x, y}, speed, font));
+
+                    threadedCarsLock->lock();
+                    threadedCars.end();
+                    threadedCars.push_back(c);
+                    threadedCarsLock->unlock();
+
+                    carSystem.updateCarSync(*c);
+                    std::cout << "finished update for car " << c->id << std::endl;
+
+                    threadedCarsLock->lock();
+                    auto pos = std::find(threadedCars.begin(), threadedCars.end(), c);
+                    if(pos != threadedCars.end())
+                        threadedCars.erase(pos);
+                    threadedCarsLock->unlock();
+
+                    std::cout << "car " << c->id << " deleted from vec, exiting car thread" << std::endl;
+                    std::cout << "remaining references for car " << c->id << ": " << c.use_count() << std::endl;
                 }));
             }
         }
@@ -399,10 +427,13 @@ int main() {
                 window.draw(car.label);
             }
         } else {
-            for(auto car: threadedCars) {
+            threadedCarsLock->lock();
+            for(auto& car: threadedCars) {
+                // std::cout << car->id << std::endl;
                 window.draw(car->shape);
                 window.draw(car->label);
             }
+            threadedCarsLock->unlock();
         }
 
         auto frametimeDrawEnd = chrono::steady_clock::now();
