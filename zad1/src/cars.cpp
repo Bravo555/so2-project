@@ -112,6 +112,7 @@ public:
 struct CarSystem {
     SyncSystem syncRegion0;
     SyncSystem syncRegion1;
+    std::mutex syncMutex;
 
     sf::FloatRect syncRegion0Box;
     sf::FloatRect syncRegion1Box;
@@ -135,7 +136,7 @@ struct CarSystem {
 
     void update(std::vector<Car>& cars) {
         for(auto i = cars.begin(); i != cars.end(); ++i) {
-            bool shouldRemove = updateCar(*i, true);
+            bool shouldRemove = updateCar(*i, false);
             if(shouldRemove) {
                 size_t idx = i - cars.begin();
                 removeSet.insert(idx);
@@ -154,7 +155,7 @@ struct CarSystem {
         chrono::time_point<chrono::steady_clock> lastTime;
         while(true) {
             std::this_thread::sleep_for(chrono::microseconds(8333));
-            updateCar(car, false);
+            updateCar(car, true);
 
             if(car.shape.getPosition().y > windowSize.y && car.state == MOVE_STRAIGHT_DOWN) {
                 break;
@@ -165,7 +166,7 @@ struct CarSystem {
 
     // Tries to synchronize access to sync regions using their request/release
     // Token methods. Returns true if car can move, and false if it can't.
-    bool syncCrosses(Car& car, const sf::Vector2f& nextPosition) {
+    bool syncCrosses(Car& car, const sf::Vector2f& nextPosition, bool threadUpdate) {
         std::optional<std::reference_wrapper<SyncSystem>> syncRegion;
         bool canMove = true;
         if(syncRegion0Box.contains(nextPosition)) {
@@ -174,20 +175,24 @@ struct CarSystem {
             syncRegion = syncRegion1;
         } else {
             if(car.hasToken) {
+                if(threadUpdate) syncMutex.lock();
                 syncRegion0.releaseToken(car);
                 syncRegion1.releaseToken(car);
+                if(threadUpdate) syncMutex.unlock();
                 car.hasToken = false;
             }
         }
 
         if(syncRegion.has_value()) {
+            if(threadUpdate) syncMutex.lock();
             car.hasToken = car.hasToken || syncRegion.value().get().requestToken(car);
+            if(threadUpdate) syncMutex.unlock();
             canMove = car.hasToken;
         }
         return canMove;
     }
 
-    bool updateCar(Car& car, bool shouldSync) {
+    bool updateCar(Car& car, bool threadUpdate) {
         auto pos = car.shape.getPosition();
         float newX = 0, newY = 0;
 
@@ -246,7 +251,7 @@ struct CarSystem {
 
         // here check if we're trying to move on sync region
         bool canMove = true;
-        if(shouldSync) canMove = syncCrosses(car, nextPosition);
+        canMove = syncCrosses(car, nextPosition, threadUpdate);
 
         if(canMove) {
             car.shape.setPosition(nextPosition);
