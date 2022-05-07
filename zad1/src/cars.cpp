@@ -153,11 +153,8 @@ struct CarSystem {
     void updateCarSync(Car& car) {
         chrono::time_point<chrono::steady_clock> lastTime;
         while(true) {
-            auto currTime = chrono::steady_clock::now();
-            if(chrono::duration_cast<ms>(currTime - lastTime).count() > 8.3) {
-                updateCar(car, false);
-                lastTime = currTime;
-            }
+            std::this_thread::sleep_for(chrono::microseconds(8333));
+            updateCar(car, false);
 
             if(car.shape.getPosition().y > windowSize.y && car.state == MOVE_STRAIGHT_DOWN) {
                 break;
@@ -169,7 +166,6 @@ struct CarSystem {
     // Tries to synchronize access to sync regions using their request/release
     // Token methods. Returns true if car can move, and false if it can't.
     bool syncCrosses(Car& car, const sf::Vector2f& nextPosition) {
-
         std::optional<std::reference_wrapper<SyncSystem>> syncRegion;
         bool canMove = true;
         if(syncRegion0Box.contains(nextPosition)) {

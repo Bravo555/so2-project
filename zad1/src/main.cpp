@@ -41,7 +41,7 @@ const float CAR_SPEED_MAX = 2.0f;
 
 const int NUM_CARS = 20;
 
-const bool THREAD_UPDATE = false;
+const bool THREAD_UPDATE = true;
 
 namespace chrono = std::chrono;
 using ms = std::chrono::duration<float, std::milli>;
