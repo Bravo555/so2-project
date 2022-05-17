@@ -1,7 +1,6 @@
 #include <iostream>
 #include <iomanip>
 #include <thread>
-#include <mutex>
 #include <random>
 #include <memory>
 #include <queue>
@@ -45,11 +44,6 @@ const bool THREAD_UPDATE = true;
 
 namespace chrono = std::chrono;
 using ms = std::chrono::duration<float, std::milli>;
-
-template <typename T>
-void printVecInline(const std::vector<T>& v) {
-    for(auto& e: v) { std::cout << e << ' '; }
-}
 
 
 int main() {

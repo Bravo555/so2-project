@@ -4,11 +4,18 @@
 #include <chrono>
 #include <iostream>
 #include <optional>
+#include <mutex>
+#include <condition_variable>
 
 namespace chrono = std::chrono;
 using ms = std::chrono::duration<float, std::milli>;
 
 const float CAR_SIZE = 20.0f;
+
+template <typename T>
+void printVecInline(const std::vector<T>& v) {
+    for(auto& e: v) { std::cout << e << ' '; }
+}
 
 enum CarMoveState {
     MOVE_RIGHT,
@@ -72,6 +79,8 @@ class SyncSystem {
 public:
     std::vector<std::pair<uint32_t, CarMoveState>> givenTokens;
     static const int MAX_TOKENS = 4;
+    std::condition_variable cv;
+    std::mutex mutex;
 
     // Save all token requests into a sorted set. To grant a token, check if:
     // - it's at the index [0..MAX_TOKENS) after this token is released, next
@@ -79,6 +88,7 @@ public:
     // items will shift to the left and we'll be able to grant the token to the
     // next item in the waiting line immediately
     bool requestToken(const Car& car) {
+        std::unique_lock lock(mutex);
         auto eqId = [&](const std::pair<uint32_t, CarMoveState>& pair) { return car.id == pair.first; };
         auto pos = std::find_if(givenTokens.begin(), givenTokens.end(), eqId);
         if(pos == std::end(givenTokens)) {
@@ -92,27 +102,36 @@ public:
         auto matchPos = std::find_if(givenTokens.begin(), givenTokens.end(),
             [&](std::pair<uint32_t, CarMoveState>& pair){ return car.state != pair.second;});
 
-        auto shouldPass = std::distance(givenTokens.begin(), pos) < MAX_TOKENS
+        auto shouldPass = [&] {
+            auto pos = std::find_if(givenTokens.begin(), givenTokens.end(), eqId);
+            bool isQueuedBehindOpposingState = std::find_if(givenTokens.begin(), pos,
+                [&](std::pair<uint32_t, CarMoveState>& pair){ return car.state != pair.second;}) != pos;
+            auto shouldPass = std::distance(givenTokens.begin(), pos) < MAX_TOKENS
             && !isQueuedBehindOpposingState;
+            return shouldPass;
+        };
 
-        return shouldPass;
+        cv.wait(lock, shouldPass);
+        return true;
     }
 
     bool releaseToken(const Car& car) {
+        std::unique_lock lock(mutex);
         auto eqId = [&](const std::pair<uint32_t, CarMoveState>& pair) { return car.id == pair.first; };
         auto pos = std::find_if(givenTokens.begin(), givenTokens.end(), eqId);
         if(pos == std::end(givenTokens)) {
             return false;
         }
         givenTokens.erase(pos);
+        lock.unlock();
+        cv.notify_all();
         return true;
     }
 };
 
 struct CarSystem {
-    SyncSystem syncRegion0;
-    SyncSystem syncRegion1;
-    std::mutex syncMutex;
+    SyncSystem syncRegion0 = SyncSystem{};
+    SyncSystem syncRegion1 = SyncSystem{};
 
     sf::FloatRect syncRegion0Box;
     sf::FloatRect syncRegion1Box;
@@ -122,9 +141,6 @@ struct CarSystem {
 
     CarSystem(const sf::FloatRect& path, const sf::Vector2f& syncPos0,
         const sf::Vector2f& syncPos1, const sf::Vector2f syncSize, const sf::Vector2f windowSize) {
-            syncRegion0 = SyncSystem{};
-            syncRegion1 = SyncSystem{};
-
             syncRegion0Box = sf::Rect<float>(syncPos0, syncSize);
             syncRegion1Box = sf::Rect<float>(syncPos1, syncSize);
 
@@ -134,6 +150,7 @@ struct CarSystem {
 
     std::unordered_set<size_t> removeSet;
 
+    // TODO fix deleting on wrong indexes
     void update(std::vector<Car>& cars) {
         for(auto i = cars.begin(); i != cars.end(); ++i) {
             bool shouldRemove = updateCar(*i, false);
@@ -143,16 +160,13 @@ struct CarSystem {
             }
         }
 
-        if(!removeSet.empty()) {
             for(auto idx: removeSet) {
                 cars.erase(cars.begin() + idx);
             }
             removeSet.clear();
         }
-    }
 
     void updateCarSync(Car& car) {
-        chrono::time_point<chrono::steady_clock> lastTime;
         while(true) {
             std::this_thread::sleep_for(chrono::microseconds(8333));
             updateCar(car, true);
@@ -175,18 +189,14 @@ struct CarSystem {
             syncRegion = syncRegion1;
         } else {
             if(car.hasToken) {
-                if(threadUpdate) syncMutex.lock();
                 syncRegion0.releaseToken(car);
                 syncRegion1.releaseToken(car);
-                if(threadUpdate) syncMutex.unlock();
                 car.hasToken = false;
             }
         }
 
         if(syncRegion.has_value()) {
-            if(threadUpdate) syncMutex.lock();
             car.hasToken = car.hasToken || syncRegion.value().get().requestToken(car);
-            if(threadUpdate) syncMutex.unlock();
             canMove = car.hasToken;
         }
         return canMove;
