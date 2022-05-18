@@ -74,22 +74,22 @@ int main() {
 
     auto cars = std::make_shared<std::vector<Car>>();
     auto readCarsLock = std::make_shared<std::mutex>();
-    auto carSystem = CarSystem(
+    auto carSystem = std::shared_ptr<CarSystem>(new CarSystem{
         {PATH_START_X, PATH_START_Y, PATH_SIZE_X, PATH_SIZE_Y},
         {CROSSTRACK_X, SYNC_REGION0_Y},
         {CROSSTRACK_X, SYNC_REGION1_Y},
         {SYNC_REGION_WIDTH, SYNC_REGION_HEIGHT},
         {WINDOW_WIDTH, WINDOW_HEIGHT}
-    );
+    });
 
     auto pause = std::make_shared<std::atomic<bool>>(false);
-    std::vector<std::thread*> handles;
+    std::vector<std::jthread*> handles;
 
     auto threadedCarsLock = std::make_shared<std::mutex>();
     std::vector<std::shared_ptr<Car>> threadedCars;
     threadedCars.reserve(200);
 
-    auto spawnTrack = new std::thread([&, readCarsLock, cars, pause] {
+    auto spawnTrack = new std::jthread([&, readCarsLock, cars, pause] {
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<int> car_offset_dist(-TRACK_THICKNESS / 4, TRACK_THICKNESS / 4);
@@ -110,26 +110,30 @@ int main() {
                 auto& c = cars->emplace_back(Car::spawnTrack({PATH_START_X, PATH_START_Y}, {x, y}, speed, font));
                 readCarsLock->unlock();
             } else {
-                handles.emplace_back(new std::thread([&](){
+                handles.emplace_back(new std::jthread([&](){
                     auto c = std::make_shared<Car>(Car::spawnTrack({PATH_START_X, PATH_START_Y}, {x, y}, speed, font));
                     threadedCarsLock->lock();
                     threadedCars.push_back(c);
                     threadedCarsLock->unlock();
-                    carSystem.updateCarSync(*c);
+                    carSystem->updateCarSync(*c);
                 }));
+            }
+        
+            if(carSystem->exit) {
+                return;
             }
         }
         std::cout << "spawn thread exiting!" << std::endl;
     });
 
-    auto spawnCrosstrack = new std::thread([&, readCarsLock, cars, pause] {
+    auto spawnCrosstrack = new std::jthread([&, readCarsLock, cars, pause] {
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<int> car_offset_dist(-TRACK_THICKNESS / 4, TRACK_THICKNESS / 4);
         std::uniform_real_distribution<float> speed_dist(CAR_SPEED_MIN, CAR_SPEED_MAX);
         std::uniform_int_distribution<int> nextSpawnTimeMsDist(100, 1000);
 
-        while(true) {
+        while(!carSystem->exit) {
             auto nextSpawnTimeMs = nextSpawnTimeMsDist(gen);
             std::this_thread::sleep_for(chrono::milliseconds(nextSpawnTimeMs));
             if(*pause) continue;
@@ -143,7 +147,7 @@ int main() {
                 auto& c = cars->emplace_back(Car::spawnCross({CROSSTRACK_X + (CROSSTRACK_WIDTH / 2), 0}, {x, y}, speed, font));
                 readCarsLock->unlock();
             } else {
-                handles.emplace_back(new std::thread([&](){
+                handles.emplace_back(new std::jthread([&](){
                     auto c = std::make_shared<Car>(Car::spawnCross({CROSSTRACK_X + (CROSSTRACK_WIDTH / 2), 0}, {x, y}, speed, font));
 
                     threadedCarsLock->lock();
@@ -151,7 +155,7 @@ int main() {
                     threadedCars.push_back(c);
                     threadedCarsLock->unlock();
 
-                    carSystem.updateCarSync(*c);
+                    carSystem->updateCarSync(*c);
 
                     threadedCarsLock->lock();
                     auto pos = std::find(threadedCars.begin(), threadedCars.end(), c);
@@ -174,8 +178,10 @@ int main() {
         sf::Event event;
         while (window.pollEvent(event))
         {
-            if (event.type == sf::Event::Closed)
+            if (event.type == sf::Event::Closed) {
+                carSystem->shutdown();
                 window.close();
+            }
 
             if(event.type == sf::Event::KeyPressed) {
                 if(event.key.code == sf::Keyboard::P) {
@@ -192,7 +198,7 @@ int main() {
 
         // update
         auto frametimeUpdateStart = chrono::steady_clock::now();
-        if(!THREAD_UPDATE) carSystem.update(*cars);
+        if(!THREAD_UPDATE) carSystem->update(*cars);
         auto frametimeUpdateEnd = chrono::steady_clock::now();
 
         // draw

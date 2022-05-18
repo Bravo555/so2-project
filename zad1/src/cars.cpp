@@ -81,6 +81,7 @@ public:
     static const int MAX_TOKENS = 4;
     std::condition_variable cv;
     std::mutex mutex;
+    std::atomic<bool> exit;
 
     // Save all token requests into a sorted set. To grant a token, check if:
     // - it's at the index [0..MAX_TOKENS) after this token is released, next
@@ -108,7 +109,7 @@ public:
                 [&](std::pair<uint32_t, CarMoveState>& pair){ return car.state != pair.second;}) != pos;
             auto shouldPass = std::distance(givenTokens.begin(), pos) < MAX_TOKENS
             && !isQueuedBehindOpposingState;
-            return shouldPass;
+            return shouldPass || exit;
         };
 
         cv.wait(lock, shouldPass);
@@ -133,6 +134,8 @@ struct CarSystem {
     SyncSystem syncRegion0 = SyncSystem{};
     SyncSystem syncRegion1 = SyncSystem{};
 
+    std::atomic<bool> exit;
+
     sf::FloatRect syncRegion0Box;
     sf::FloatRect syncRegion1Box;
 
@@ -146,6 +149,15 @@ struct CarSystem {
 
             this->path = path;
             this->windowSize = windowSize;
+    }
+
+    void shutdown() {
+        exit = true;
+        syncRegion0.exit = true;
+        syncRegion1.exit = true;
+
+        syncRegion0.cv.notify_all();
+        syncRegion1.cv.notify_all();
     }
 
     std::unordered_set<size_t> removeSet;
@@ -167,7 +179,7 @@ struct CarSystem {
         }
 
     void updateCarSync(Car& car) {
-        while(true) {
+        while(!exit) {
             std::this_thread::sleep_for(chrono::microseconds(8333));
             updateCar(car, true);
 
