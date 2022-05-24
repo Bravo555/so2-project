@@ -30,7 +30,7 @@ const int CROSSTRACK_WIDTH = 100;
 const float SYNC_REGION0_Y = (WINDOW_HEIGHT / 2) - (TRACK_HEIGHT / 2) - TRACK_THICKNESS;
 const float SYNC_REGION1_Y = (WINDOW_HEIGHT / 2) + (TRACK_HEIGHT / 2);
 
-const int SYNC_REGION_WIDTH = CROSSTRACK_WIDTH;
+const float SYNC_REGION_WIDTH = CROSSTRACK_WIDTH;
 const float SYNC_REGION_HEIGHT = TRACK_THICKNESS;
 
 const int FRAMETIME_INFO_PRINT_INTERVAL_MS = 1000;
@@ -79,7 +79,8 @@ int main() {
         {CROSSTRACK_X, SYNC_REGION0_Y},
         {CROSSTRACK_X, SYNC_REGION1_Y},
         {SYNC_REGION_WIDTH, SYNC_REGION_HEIGHT},
-        {WINDOW_WIDTH, WINDOW_HEIGHT}
+        {WINDOW_WIDTH, WINDOW_HEIGHT},
+        font
     });
 
     auto pause = std::make_shared<std::atomic<bool>>(false);
@@ -87,7 +88,6 @@ int main() {
 
     auto threadedCarsLock = std::make_shared<std::mutex>();
     std::vector<std::shared_ptr<Car>> threadedCars;
-    threadedCars.reserve(200);
 
     auto spawnTrack = new std::jthread([&, readCarsLock, cars, pause] {
         std::random_device rd;
@@ -209,6 +209,8 @@ int main() {
         window.draw(crossTrack);
         window.draw(syncRegion0);
         window.draw(syncRegion1);
+
+        carSystem->draw(window);
 
         if(!THREAD_UPDATE) {
             for(auto& car: *cars) {

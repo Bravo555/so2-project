@@ -6,6 +6,7 @@
 #include <optional>
 #include <mutex>
 #include <condition_variable>
+#include <sstream>
 
 namespace chrono = std::chrono;
 using ms = std::chrono::duration<float, std::milli>;
@@ -83,6 +84,27 @@ public:
     std::mutex mutex;
     std::atomic<bool> exit;
 
+    sf::Text passingVehiclesText;
+    sf::RectangleShape passingVehiclesBackground;
+    std::string passingVehiclesString;
+
+    SyncSystem() {
+        passingVehiclesBackground.setSize({100.0, 40.0});
+        passingVehiclesBackground.setFillColor(sf::Color(255, 255, 255, 100));
+
+        passingVehiclesText.setCharacterSize(14);
+    }
+
+    void setTextPosition(const sf::Vector2f& position) {
+        passingVehiclesBackground.setPosition(position);
+        passingVehiclesText.setPosition(position);
+    }
+
+    void draw(sf::RenderWindow& window) {
+        window.draw(passingVehiclesBackground);
+        window.draw(passingVehiclesText);
+    }
+
     // Save all token requests into a sorted set. To grant a token, check if:
     // - it's at the index [0..MAX_TOKENS) after this token is released, next
     // - there are no elements with opposing state before in the queue
@@ -113,6 +135,14 @@ public:
         };
 
         cv.wait(lock, shouldPass);
+
+        // oh yes, just let me write 3 lines to interpolate a string
+        // WHYYYYYY
+        std::ostringstream ss;
+        ss << car.id << " ";
+
+        passingVehiclesString.append(ss.str());
+        passingVehiclesText.setString(passingVehiclesString);
         return true;
     }
 
@@ -124,8 +154,17 @@ public:
             return false;
         }
         givenTokens.erase(pos);
-        lock.unlock();
+
+        std::ostringstream ss;
+        ss << car.id << " ";
+        auto strPos = passingVehiclesString.find(ss.str());
+        if(strPos != passingVehiclesString.npos) {
+            passingVehiclesString.erase(strPos, ss.str().length());
+            passingVehiclesText.setString(passingVehiclesString);
+        }
+
         cv.notify_all();
+
         return true;
     }
 };
@@ -143,9 +182,16 @@ struct CarSystem {
     sf::Vector2f windowSize;
 
     CarSystem(const sf::FloatRect& path, const sf::Vector2f& syncPos0,
-        const sf::Vector2f& syncPos1, const sf::Vector2f syncSize, const sf::Vector2f windowSize) {
+        const sf::Vector2f& syncPos1, const sf::Vector2f& syncSize,
+        const sf::Vector2f windowSize, sf::Font& font) {
             syncRegion0Box = sf::Rect<float>(syncPos0, syncSize);
             syncRegion1Box = sf::Rect<float>(syncPos1, syncSize);
+
+            syncRegion0.setTextPosition(syncPos0 + sf::Vector2f{syncSize.x, syncSize.y});
+            syncRegion1.setTextPosition(syncPos1 + sf::Vector2f{syncSize.x, syncSize.y});
+
+            syncRegion0.passingVehiclesText.setFont(font);
+            syncRegion1.passingVehiclesText.setFont(font);
 
             this->path = path;
             this->windowSize = windowSize;
@@ -158,6 +204,11 @@ struct CarSystem {
 
         syncRegion0.cv.notify_all();
         syncRegion1.cv.notify_all();
+    }
+
+    void draw(sf::RenderWindow& window) {
+        syncRegion0.draw(window);
+        syncRegion1.draw(window);
     }
 
     std::unordered_set<size_t> removeSet;
